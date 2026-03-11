@@ -16,59 +16,42 @@ AMS_FILAMENTS = [
     (0.75, 0.55, 0.05), # 6. Gold
 ]
 
-# 2. MAXIMALE GLÄTTUNG
-SMOOTHING_PASSES = 40
+# 2. GLÄTTUNG & REINIGUNG
+SMOOTHING_PASSES = 30
+MIN_REGION_SIZE = 1000  # Große Dampfwalze für saubere Flächen
 
-# 3. DIE ULTIMATIVE DAMPFWALZE
-# 1500 Polygone löscht alle kleinen Reflexionen und Schattenreste.
-MIN_REGION_SIZE = 1500
-
-# 4. MESH UNTERTEILUNG
+# 3. MESH UNTERTEILUNG
 SUBDIVISIONS = 1 
 # ---------------------
 
 def get_distance(c1, c2):
     h1, s1, v1 = colorsys.rgb_to_hsv(c1[0], c1[1], c1[2])
     h2, s2, v2 = colorsys.rgb_to_hsv(c2[0], c2[1], c2[2])
-
     dh = min(abs(h1 - h2), 1.0 - abs(h1 - h2))
     ds = abs(s1 - s2)
     dv = abs(v1 - v2)
-
-    # Spezial-Logik für Schwarz und Weiß
-    # Wenn ein Filament fast schwarz ist, ignorieren wir den Farbton fast komplett
-    is_dark = v2 < 0.1
-    is_bright = v2 > 0.8 and s2 < 0.1
-    
-    if is_dark or is_bright:
-        return dv * 2.0 + ds * 1.0 # Fokus nur auf Helligkeit/Sättigung
-    
-    # Für bunte Farben: Farbton ist alles!
+    if v2 < 0.1 or (v2 > 0.8 and s2 < 0.1): 
+        return dv * 2.0 + ds * 1.0
     return (dh * 10.0) + (ds * 2.0) + (dv * 0.5)
-
-def auto_setup_texture(obj):
-    if not obj.data.materials: return False
-    mat = obj.data.materials[0]
-    if not getattr(mat, "use_nodes", False): mat.use_nodes = True
-    nodes = mat.node_tree.nodes
-    links = mat.node_tree.links
-    bsdf = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
-    img_node = next((n for n in nodes if n.type == 'TEX_IMAGE' and n.image), None)
-    if not bsdf or not img_node: return False
-    nodes.active = img_node
-    links.new(img_node.outputs['Color'], bsdf.inputs['Base Color'])
-    return True
 
 def run_all_in_one():
     obj = bpy.context.active_object
     if not obj or obj.type != 'MESH': return
 
-    print("=== START: AMS FILAMENT ULTIMATIVE REINIGUNG ===")
+    print("=== START: GENERIERUNG VON FESTKÖRPERN (SOLID OBJECTS) ===")
 
-    if not auto_setup_texture(obj): return
+    # 1. Vorbereitung & Baking
+    if not obj.data.materials: return
+    mat = obj.data.materials[0]
+    mat.use_nodes = True
+    bsdf = next((n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    img_node = next((n for n in mat.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image), None)
+    if bsdf and img_node:
+        mat.node_tree.links.new(img_node.outputs['Color'], bsdf.inputs['Base Color'])
+        mat.node_tree.nodes.active = img_node
 
     if SUBDIVISIONS > 0:
-        print(f"1. Unterteile Mesh...")
+        print("1. Unterteile Mesh...")
         mod = obj.modifiers.new(name="SubSurf", type='SUBSURF')
         mod.levels = SUBDIVISIONS
         mod.subdivision_type = 'SIMPLE'
@@ -76,37 +59,34 @@ def run_all_in_one():
 
     print("2. Baking...")
     bpy.context.scene.render.engine = 'CYCLES'
-    if not obj.data.vertex_colors:
-        vcol = obj.data.vertex_colors.new(name="BakeColor")
-    else:
-        vcol = obj.data.vertex_colors.active
-    obj.data.vertex_colors.active = vcol
+    if not obj.data.vertex_colors: obj.data.vertex_colors.new(name="BakeColor")
+    vcol = obj.data.vertex_colors.active
     bpy.ops.object.bake(type='DIFFUSE', pass_filter={'COLOR'}, target='VERTEX_COLORS')
 
-    print("3. Analysiere Farben...")
+    # 3. Farbe auslesen (Object Mode!)
+    print("3. Analysiere Palette...")
     mesh = obj.data
     data = vcol.data
     face_to_best_i = {}
     for poly in mesh.polygons:
         item = data[poly.loop_indices[0]]
         c = (item.color[0], item.color[1], item.color[2]) if hasattr(item, 'color') else (1,1,1)
-        best_i = min(range(len(AMS_FILAMENTS)), key=lambda i: get_distance(c, AMS_FILAMENTS[i]))
-        face_to_best_i[poly.index] = best_i
+        face_to_best_i[poly.index] = min(range(len(AMS_FILAMENTS)), key=lambda i: get_distance(c, AMS_FILAMENTS[i]))
 
+    # 4. Materialien & Reinigung
     obj.data.materials.clear()
     for i, color in enumerate(AMS_FILAMENTS):
-        mat = bpy.data.materials.new(name=f"AMS_Slot_{i+1}")
-        mat.use_nodes = True
-        mat.node_tree.nodes.get("Principled BSDF").inputs[0].default_value = (color[0], color[1], color[2], 1)
-        obj.data.materials.append(mat)
+        new_mat = bpy.data.materials.new(name=f"AMS_{i+1}")
+        new_mat.use_nodes = True
+        new_mat.node_tree.nodes.get("Principled BSDF").inputs[0].default_value = (color[0], color[1], color[2], 1)
+        obj.data.materials.append(new_mat)
 
-    print("4. Glätte und reinige Mesh radikal...")
     bpy.ops.object.mode_set(mode='EDIT')
     bm = bmesh.from_edit_mesh(mesh)
     bm.faces.ensure_lookup_table()
     for f in bm.faces: f.material_index = face_to_best_i[f.index]
 
-    # Aggressives Glätten
+    print("4. Glätte Kanten...")
     for _ in range(SMOOTHING_PASSES):
         changes = {}
         for f in bm.faces:
@@ -117,8 +97,8 @@ def run_all_in_one():
                     changes[f] = mc
         for f, nm in changes.items(): f.material_index = nm
 
-    # Aggressiver Schmutzfilter
-    for _ in range(4):
+    print("5. Schmutz-Filter...")
+    for _ in range(2):
         visited = set()
         for face in bm.faces:
             if face.index in visited: continue
@@ -141,6 +121,8 @@ def run_all_in_one():
                     for isl_f in island: isl_f.material_index = target
         bmesh.update_edit_mesh(mesh)
 
+    # 6. Zerschneiden
+    print("6. Zerschneide Modell...")
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
@@ -155,11 +137,30 @@ def run_all_in_one():
         bpy.ops.mesh.separate(type='LOOSE')
         bpy.ops.object.mode_set(mode='OBJECT')
 
-    final = bpy.context.selected_objects
-    for p in final:
+    # 7. NEU: MAKE SOLID (Löcher schließen)
+    print("7. Erzeuge Volumen (Schließe Löcher an den Schnittkanten)...")
+    final_parts = bpy.context.selected_objects.copy()
+    for p in final_parts:
         bpy.context.view_layer.objects.active = p
+        bpy.ops.object.mode_set(mode='EDIT')
+        bm_p = bmesh.from_edit_mesh(p.data)
+        
+        # Finde alle offenen Kanten (Non-Manifold)
+        bm_p.edges.ensure_lookup_table()
+        boundary_edges = [e for e in bm_p.edges if e.is_boundary]
+        
+        if boundary_edges:
+            # Markiere alle offenen Kanten und schließe sie
+            bpy.ops.mesh.select_all(action='DESELECT')
+            for e in boundary_edges:
+                e.select = True
+            # Schließt die Löcher mit einem Face (F-Befehl)
+            bpy.ops.mesh.edge_face_add()
+            
+        bmesh.update_edit_mesh(p.data)
+        bpy.ops.object.mode_set(mode='OBJECT')
         bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='MEDIAN')
 
-    print(f"=== FERTIG! {len(final)} saubere Teile. ===")
+    print(f"=== FERTIG! {len(final_parts)} solide Festkörper erstellt. ===")
 
 run_all_in_one()
