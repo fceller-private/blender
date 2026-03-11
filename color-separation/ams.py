@@ -7,36 +7,38 @@ from collections import Counter
 
 # --- KONFIGURATION ---
 
-# 1. WIE VIELE FILAMENTE HAST DU IM AMS?
-# Das Script findet automatisch die X wichtigsten Farben deines Modells.
-TARGET_FILAMENT_COUNT = 6 
+# 1. MAXIMALE ANZAHL AN FARBEN (Filamente im AMS)
+MAX_COLORS = 6 
 
-# 2. GLÄTTUNG & REINIGUNG
-SMOOTHING_PASSES = 35
-MIN_REGION_SIZE = 1200 
+# 2. FILTER-EINSTELLUNGEN
+SMOOTHING_PASSES = 35   # Glättet Kanten
+MIN_REGION_SIZE = 1200  # Entfernt kleine "Inseln"
 
 # 3. MESH UNTERTEILUNG
 SUBDIVISIONS = 1 
 # ---------------------
 
-def get_distance(c1, c2):
-    # HSV-basierte Distanz für bessere Farbtrennung
-    h1, s1, v1 = colorsys.rgb_to_hsv(c1[0], c1[1], c1[2])
-    h2, s2, v2 = colorsys.rgb_to_hsv(c2[0], c2[1], c2[2])
+def get_hsv_distance(rgb1, rgb2):
+    """Berechnet den Abstand zwischen zwei Farben im HSV-Farbraum."""
+    h1, s1, v1 = colorsys.rgb_to_hsv(rgb1[0], rgb1[1], rgb1[2])
+    h2, s2, v2 = colorsys.rgb_to_hsv(rgb2[0], rgb2[1], rgb2[2])
+
+    # Hue-Differenz (beachtet den 360° Kreis)
     dh = min(abs(h1 - h2), 1.0 - abs(h1 - h2))
     ds = abs(s1 - s2)
     dv = abs(v1 - v2)
-    if v2 < 0.1 or (v2 > 0.8 and s2 < 0.1): 
-        return dv * 2.0 + ds * 1.0
-    return (dh * 10.0) + (ds * 2.0) + (dv * 0.5)
+
+    # Gewichtung: Hue ist am wichtigsten für die Farbtrennung.
+    # Value (Helligkeit) wird niedriger gewichtet, um Schatten zu ignorieren.
+    return (dh * 10.0) + (ds * 2.0) + (dv * 1.0)
 
 def run_all_in_one():
     obj = bpy.context.active_object
     if not obj or obj.type != 'MESH': return
 
-    print("=== START: AUTOMATISCHE PALETTE & VOLUMEN-ZERLEGUNG ===")
+    print(f"=== START: HSV-BASIERTE ZERLEGUNG (MAX {MAX_COLORS} FARBEN) ===")
 
-    # 1. Vorbereitung & Baking
+    # 1. Material & Texture-Setup
     if not obj.data.materials: return
     mat = obj.data.materials[0]
     mat.use_nodes = True
@@ -46,6 +48,7 @@ def run_all_in_one():
         mat.node_tree.links.new(img_node.outputs['Color'], bsdf.inputs['Base Color'])
         mat.node_tree.nodes.active = img_node
 
+    # 2. Subdivision
     if SUBDIVISIONS > 0:
         print("1. Unterteile Mesh...")
         mod = obj.modifiers.new(name="SubSurf", type='SUBSURF')
@@ -53,14 +56,15 @@ def run_all_in_one():
         mod.subdivision_type = 'SIMPLE'
         bpy.ops.object.modifier_apply(modifier="SubSurf")
 
-    print("2. Baking (Generiere Farbdaten)...")
+    # 3. Baking
+    print("2. Baking Farbdaten...")
     bpy.context.scene.render.engine = 'CYCLES'
     if not obj.data.vertex_colors: obj.data.vertex_colors.new(name="BakeColor")
     vcol = obj.data.vertex_colors.active
     bpy.ops.object.bake(type='DIFFUSE', pass_filter={'COLOR'}, target='VERTEX_COLORS')
 
-    # 3. AUTOMATISCHE PALETTE FINDEN (K-Means)
-    print(f"3. Extrahiere die {TARGET_FILAMENT_COUNT} wichtigsten Farben...")
+    # 4. Automatische Palette finden per HSV-Clustering
+    print(f"3. Suche die {MAX_COLORS} wichtigsten Farbbereiche (HSV)...")
     mesh = obj.data
     data = vcol.data
     all_colors = []
@@ -68,25 +72,22 @@ def run_all_in_one():
         item = data[poly.loop_indices[0]]
         all_colors.append((item.color[0], item.color[1], item.color[2]))
 
-    # Initialisierung der Zentren (Zufällige Punkte aus dem Modell)
-    centers = random.sample(all_colors, TARGET_FILAMENT_COUNT)
+    # K-Means Initialisierung (Zufall)
+    centers = random.sample(all_colors, MAX_COLORS)
     
-    # 10 Iterationen um die Palette zu verfeinern
-    for _ in range(10):
-        clusters = {i: [] for i in range(TARGET_FILAMENT_COUNT)}
+    # 15 Iterationen für eine stabile Palette
+    for _ in range(15):
+        clusters = {i: [] for i in range(MAX_COLORS)}
         for c in all_colors:
-            best_i = min(range(TARGET_FILAMENT_COUNT), key=lambda i: get_distance(c, centers[i]))
+            best_i = min(range(MAX_COLORS), key=lambda i: get_hsv_distance(c, centers[i]))
             clusters[best_i].append(c)
         
-        for i in range(TARGET_FILAMENT_COUNT):
+        for i in range(MAX_COLORS):
             if clusters[i]:
+                # Berechne neues Zentrum im RGB-Raum (Durchschnitt)
                 centers[i] = tuple(sum(col[j] for col in clusters[i]) / len(clusters[i]) for j in range(3))
 
-    print("   Gefundene Palette (RGB):")
-    for i, c in enumerate(centers):
-        print(f"   Filament {i+1}: {round(c[0],2)}, {round(c[1],2)}, {round(c[2],2)}")
-
-    # 4. Zuweisung & Materialien
+    # 5. Materialien erstellen & Zuweisung
     obj.data.materials.clear()
     for i, color in enumerate(centers):
         new_mat = bpy.data.materials.new(name=f"Filament_{i+1}")
@@ -99,9 +100,10 @@ def run_all_in_one():
     bm.faces.ensure_lookup_table()
     for f in bm.faces:
         poly_color = all_colors[f.index]
-        f.material_index = min(range(TARGET_FILAMENT_COUNT), key=lambda i: get_distance(poly_color, centers[i]))
+        f.material_index = min(range(MAX_COLORS), key=lambda i: get_hsv_distance(poly_color, centers[i]))
 
-    print("4. Glätte und Reinige Mesh...")
+    # 6. Reinigung (Smoothing & Schmutz)
+    print("4. Bereinige Farbflächen...")
     for _ in range(SMOOTHING_PASSES):
         changes = {}
         for f in bm.faces:
@@ -112,7 +114,7 @@ def run_all_in_one():
                     changes[f] = mc
         for f, nm in changes.items(): f.material_index = nm
 
-    # Schmutz-Filter
+    # Inselfilter
     visited = set()
     for face in bm.faces:
         if face.index in visited: continue
@@ -129,10 +131,11 @@ def run_all_in_one():
             if nmats:
                 target = Counter(nmats).most_common(1)[0][0]
                 for isl_f in island: isl_f.material_index = target
+    
     bmesh.update_edit_mesh(mesh)
 
-    # 5. Zerschneiden & Schließen
-    print("5. Erzeuge solide Bauteile...")
+    # 7. Zerschneiden & Deckeln (Solid Objects)
+    print("5. Erzeuge finale Festkörper...")
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
@@ -159,6 +162,6 @@ def run_all_in_one():
         bpy.ops.object.mode_set(mode='OBJECT')
         bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='MEDIAN')
 
-    print(f"=== FERTIG! {len(bpy.context.selected_objects)} Teile erstellt ===")
+    print(f"=== FERTIG! {len(bpy.context.selected_objects)} solide Teile erstellt ===")
 
 run_all_in_one()
