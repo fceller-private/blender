@@ -1,28 +1,25 @@
 import bpy
 import time
 
-def remesh_and_bake_texture_safe(precision=200):
+def remesh_and_bake_hq(precision=350, search_radius=0.002):
     print("\n" + "="*60)
-    print(" PIPELINE: CYCLES TEXTURE BAKING (SAFE MODE) ")
+    print(" PIPELINE: CYCLES BAKING (HIGH QUALITY & ANTI-ARTEFAKT) ")
     print("="*60)
     
     start_time = time.time()
     
-    # 1. Original prüfen
     original_obj = bpy.context.active_object
     if not original_obj or original_obj.type != 'MESH':
         print("[ERROR] Bitte wähle zuerst das Originalmodell aus!")
         return
 
-    # 2. Render-Engine auf Cycles stellen
     print("[PROCESS] Richte Cycles-Renderer ein...")
     bpy.context.scene.render.engine = 'CYCLES'
     
-    # 3. Kopie & Remesh
-    print("[PROCESS] Erzeuge Voxel-Hülle...")
+    print("[PROCESS] Erzeuge hochauflösende Voxel-Hülle...")
     bpy.ops.object.duplicate()
     recon_obj = bpy.context.active_object
-    recon_obj.name = original_obj.name + "_SOLID_PRINT"
+    recon_obj.name = original_obj.name + "_SOLID_HQ"
     
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
     
@@ -34,19 +31,13 @@ def remesh_and_bake_texture_safe(precision=200):
     mod_remesh.voxel_size = v_size
     bpy.ops.object.modifier_apply(modifier="Solid")
 
-    # ---------------------------------------------------------
-    # DER BUGFIX FÜR DEN ABSTURZ (MikkTSpace / calc_uv_tangents)
-    # ---------------------------------------------------------
-    print("[PROCESS] Erzeuge Dummy-UV-Map (Crash-Prävention)...")
+    print("[PROCESS] Erzeuge Dummy-UV-Map...")
     bpy.context.view_layer.objects.active = recon_obj
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
-    # Wir machen ein schnelles, grobes Unwrapping
     bpy.ops.uv.smart_project(angle_limit=1.15) 
     bpy.ops.object.mode_set(mode='OBJECT')
-    # ---------------------------------------------------------
     
-    # 4. Farbattribut auf dem ZIEL erstellen
     print("[PROCESS] Bereite Vertex Colors vor...")
     color_attr = recon_obj.data.color_attributes.new(
         name="BakedColor", 
@@ -55,24 +46,23 @@ def remesh_and_bake_texture_safe(precision=200):
     )
     recon_obj.data.attributes.active_color = color_attr
     
-    # 5. Baking Setup (Selected to Active)
+    # --- BAKE SETTINGS (ANTI-ARTEFAKT) ---
     bpy.context.scene.cycles.bake_type = 'DIFFUSE'
     bpy.context.scene.render.bake.use_pass_direct = False
     bpy.context.scene.render.bake.use_pass_indirect = False
     bpy.context.scene.render.bake.use_pass_color = True 
     
     bpy.context.scene.render.bake.use_selected_to_active = True
-    bpy.context.scene.render.bake.cage_extrusion = 0.05
+    # HIER IST DER FIX: Ein sehr kleiner Suchradius verhindert das Durchschießen
+    bpy.context.scene.render.bake.cage_extrusion = search_radius
     bpy.context.scene.render.bake.target = 'VERTEX_COLORS'
     
-    # 6. Objekte für den Bake korrekt selektieren
     bpy.ops.object.select_all(action='DESELECT')
-    original_obj.select_set(True) # Quelle
-    recon_obj.select_set(True)    # Ziel
-    bpy.context.view_layer.objects.active = recon_obj # Aktiv = Ziel
+    original_obj.select_set(True) 
+    recon_obj.select_set(True)    
+    bpy.context.view_layer.objects.active = recon_obj 
     
-    # 7. Der Bake-Vorgang
-    print("[PROCESS] Starte Bake. ACHTUNG: Blender rechnet jetzt intensiv...")
+    print(f"[PROCESS] Starte Bake. (Präzision: {precision}, Radius: {search_radius})...")
     try:
         bpy.ops.object.bake(type='DIFFUSE')
         print(" -> Bake erfolgreich!")
@@ -80,9 +70,8 @@ def remesh_and_bake_texture_safe(precision=200):
         print(f"[ERROR] Bake fehlgeschlagen: {e}")
         return
         
-    # 8. Material Setup
     print("[PROCESS] Erstelle Vorschau-Material...")
-    mat = bpy.data.materials.new(name="Baked_Material")
+    mat = bpy.data.materials.new(name="Baked_Material_HQ")
     if hasattr(mat, "use_nodes") and not mat.use_nodes:
         mat.use_nodes = True
         
@@ -105,4 +94,5 @@ def remesh_and_bake_texture_safe(precision=200):
     print(f"[FINISH] Vorgang in {time.time() - start_time:.2f} Sekunden beendet.")
     print("="*60)
 
-remesh_and_bake_texture_safe(precision=200)
+# Ausführung mit neuen Qualitätswerten
+remesh_and_bake_hq(precision=350, search_radius=0.002)
