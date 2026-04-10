@@ -1,9 +1,9 @@
 import bpy
 import time
 
-def remesh_and_bake_hq(precision=350, search_radius=0.002):
+def remesh_and_bake_perfect(precision=350):
     print("\n" + "="*60)
-    print(" PIPELINE: CYCLES BAKING (HIGH QUALITY & ANTI-ARTEFAKT) ")
+    print(" PIPELINE: CYCLES BAKING (RAY DISTANCE FIX) ")
     print("="*60)
     
     start_time = time.time()
@@ -13,13 +13,12 @@ def remesh_and_bake_hq(precision=350, search_radius=0.002):
         print("[ERROR] Bitte wähle zuerst das Originalmodell aus!")
         return
 
-    print("[PROCESS] Richte Cycles-Renderer ein...")
     bpy.context.scene.render.engine = 'CYCLES'
     
     print("[PROCESS] Erzeuge hochauflösende Voxel-Hülle...")
     bpy.ops.object.duplicate()
     recon_obj = bpy.context.active_object
-    recon_obj.name = original_obj.name + "_SOLID_HQ"
+    recon_obj.name = original_obj.name + "_SOLID_FINAL"
     
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
     
@@ -46,15 +45,19 @@ def remesh_and_bake_hq(precision=350, search_radius=0.002):
     )
     recon_obj.data.attributes.active_color = color_attr
     
-    # --- BAKE SETTINGS (ANTI-ARTEFAKT) ---
+    # --- DIE MAGISCHEN BAKE SETTINGS ---
     bpy.context.scene.cycles.bake_type = 'DIFFUSE'
     bpy.context.scene.render.bake.use_pass_direct = False
     bpy.context.scene.render.bake.use_pass_indirect = False
     bpy.context.scene.render.bake.use_pass_color = True 
-    
     bpy.context.scene.render.bake.use_selected_to_active = True
-    # HIER IST DER FIX: Ein sehr kleiner Suchradius verhindert das Durchschießen
-    bpy.context.scene.render.bake.cage_extrusion = search_radius
+    
+    # 1. Starte 1cm außerhalb des Modells (um sicher über der alten Oberfläche zu sein)
+    bpy.context.scene.render.bake.cage_extrusion = 0.01 
+    
+    # 2. DER FIX: Fliege maximal 2cm nach innen. Verhindert das Durchschießen!
+    bpy.context.scene.render.bake.max_ray_distance = 0.02 
+    
     bpy.context.scene.render.bake.target = 'VERTEX_COLORS'
     
     bpy.ops.object.select_all(action='DESELECT')
@@ -62,7 +65,7 @@ def remesh_and_bake_hq(precision=350, search_radius=0.002):
     recon_obj.select_set(True)    
     bpy.context.view_layer.objects.active = recon_obj 
     
-    print(f"[PROCESS] Starte Bake. (Präzision: {precision}, Radius: {search_radius})...")
+    print(f"[PROCESS] Starte Bake...")
     try:
         bpy.ops.object.bake(type='DIFFUSE')
         print(" -> Bake erfolgreich!")
@@ -71,7 +74,7 @@ def remesh_and_bake_hq(precision=350, search_radius=0.002):
         return
         
     print("[PROCESS] Erstelle Vorschau-Material...")
-    mat = bpy.data.materials.new(name="Baked_Material_HQ")
+    mat = bpy.data.materials.new(name="Baked_Material_Final")
     if hasattr(mat, "use_nodes") and not mat.use_nodes:
         mat.use_nodes = True
         
@@ -94,5 +97,5 @@ def remesh_and_bake_hq(precision=350, search_radius=0.002):
     print(f"[FINISH] Vorgang in {time.time() - start_time:.2f} Sekunden beendet.")
     print("="*60)
 
-# Ausführung mit neuen Qualitätswerten
-remesh_and_bake_hq(precision=350, search_radius=0.002)
+# Führe das Skript aus
+remesh_and_bake_perfect(precision=350)
